@@ -43,4 +43,8 @@ and positions without relying on perfectly centered objects. Additional transfor
 random horizontal and vertical flips, 30-degree rotations, and color jittering to alter brightness, 
 contrast, saturation, and hue. The pipeline also incorporated random grayscale conversion, perspective distortion, 
 Gaussian blur, sharpness adjustments, and random erasing to simulate partial occlusion. 
+To further enhance the model's robustness, we extracted an additional 200 images per class from the
+Hugging Face library and integrated them directly into our training set. 
+The model was then thoroughly evaluated on the final test set, 
+and these resulting weights are the ones we ultimately submitted.
 
