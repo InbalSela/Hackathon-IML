@@ -1,0 +1,21 @@
+# Dataset - stored in Google Drive, not git
+train/
+augmentations/
+dataset/
+
+# Submission artifacts
+submissions/*.DS_Store
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# Model checkpoints
+*.pt
+*.pth
+*.ckpt
