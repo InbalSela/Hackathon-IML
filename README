@@ -1,29 +1,46 @@
-FULL_NAME_1,FULL_NAME_2
-ID_1,ID_2
+Shahar Paltiel,Inbal Sela,Yahli Zamero,Aderet Sebbagh
+323022376,211845912,210019204,214104358
 
-Architecture: SE-ResNet-18 (Squeeze-and-Excitation ResNet-18) trained from scratch on 20 ImageNet classes. The network consists of a 7x7 stem convolution followed by four residual stages with channel counts 64-128-256-512, each block enhanced with a Squeeze-and-Excitation attention module that learns per-channel importance weights. Global average pooling feeds into a single fully-connected layer outputting 20 class logits. Total parameters: ~11.3M.
+1. Architecture: SE-ResNet-18 (Squeeze-and-Excitation ResNet-18) trained from scratch on 20 ImageNet classes.
+The network first layer is a 7x7 convolution followed by four residual stages with channel counts 
+64-128-256-512, each block enhanced with a Squeeze-and-Excitation attention module that learns per-channel
+importance weights. Global average pooling feeds into a single fully-connected layer outputting 20 class logits.
+Total parameters: ~11.3M.
 
-Data split: Stratified 3-way split using a fixed seed (42) to guarantee reproducibility. Final training run uses 90% of the data (80% train + 10% val merged), with the held-out 10% test set evaluated once at the very end.
+Data split: Stratified 3-way split using a fixed seed (42) to guarantee reproducibility.
+Final training run uses 90% of the data (80% train + 10% val merged), 
+with the held-out 10% test set evaluated once just at the very end.
 
-Optimizer: Adam (lr=1e-3, weight_decay=1e-4) with CosineAnnealingLR decaying smoothly to 0 over 30 epochs. Loss: CrossEntropyLoss.
+Optimizer: Adam (lr=1e-3, weight_decay=1e-4) with CosineAnnealingLR decaying smoothly to 0 over 30 epochs.
+Loss: CrossEntropyLoss.
 
-Manipulation strategy: We applied augmentations directly to the training pipeline (not as a separate dataset) so the model learns invariance to visual changes during training. All augmentations are applied randomly on-the-fly per epoch, meaning the model never sees the exact same version of an image twice.
+2.For all stages of the experiment, 10% of the data was set aside for the final test set.
+This left the remaining 90% available for training and validation.
+A critical step in this process was converting the raw integer pixel values, which range from 0 to 255,
+into 32-bit floating-point numbers between 0.0 and 1.0. This conversion is necessary because neural networks
+rely on mathematical operations and gradient descent to update weights. 
+The preprocessing phase also included standardizing the image size to 224 by 224, using padding or cropping,
+and centering the images uniformly.
+ In Stage A, the data was divided into a 30% training set and a 60% validation set.
+The strategy was to incrementally expose the model to unseen data to prevent overfitting.
+The baseline model drew inspiration from previously built networks and the AlexNet architecture. 
+Training this baseline model yielded a best validation accuracy of 0.6952 over a total time of 145.3 minutes.
+Since this relatively simple network achieved decent accuracy with few examples,
+the decision was made to adjust the split to 50% training and 40% validation for the next stage,
+while developing a deeper model architecture.
+In Stage B, the data split was adjusted to 50% for training and 40% for validation.
+The model architecture was significantly expanded to include six convolutional blocks,
+integrating Squeeze-and-Excitation layers and dropout with a probability of 0.5 at each step.
+The results was lower accuracy than before.
+Then we did the final architecture mentioned above, An alternative ResNet-style architecture.
+Tensors, and Augmentation Strategy:
+During training, a comprehensive augmentation strategy was applied directly to the training pipeline on the fly.
+This meant the model never saw the exact same version of an image twice,
+forcing it to learn invariance to visual changes rather than memorizing specific details.
+The augmentations were designed to introduce a wide variety of image distortions.
+Random resized crops with prior padding helped the model recognize objects at different scales
+and positions without relying on perfectly centered objects. Additional transformations involved:
+random horizontal and vertical flips, 30-degree rotations, and color jittering to alter brightness, 
+contrast, saturation, and hue. The pipeline also incorporated random grayscale conversion, perspective distortion, 
+Gaussian blur, sharpness adjustments, and random erasing to simulate partial occlusion. 
 
-Augmentations used and their motivation:
-- RandomResizedCrop (scale 0.5-1.0) with prior Padding: forces the model to recognize objects at different scales and positions, not rely on object being centered.
-- RandomHorizontalFlip: left-right symmetry invariance.
-- RandomVerticalFlip (p=0.1): rare orientation changes.
-- RandomRotation (30 degrees): rotation invariance, directly addresses the random_rotation augmentation in the test set.
-- ColorJitter (brightness=0.4, contrast=0.4, saturation=0.4, hue=0.15): color and lighting invariance, directly addresses the color_jitter augmentation in the test set.
-- RandomGrayscale (p=0.15): color-independent feature learning.
-- RandomPerspective (distortion=0.3): simulates different camera angles and viewpoints.
-- GaussianBlur (sigma 0.1-2.0): robustness to blur and image quality variation.
-- RandomAdjustSharpness: handles varying image sharpness.
-- RandomErasing (p=0.2): simulates partial occlusion, forces model to use multiple object regions rather than a single discriminative patch.
-
-Performance progression:
-- Baseline (50% data, no aug, 10 epochs): 76.2% val accuracy
-- With augmentations (60% data, 30 epochs): 85.2% val accuracy
-- Final run (90% data, 30 epochs, full augmentation pipeline): evaluated on held-out test set
-
-Key finding: Augmentations reduced the train/val accuracy gap from 18 percentage points (99.6% train vs 81% val) down to ~6 points (91% train vs 85% val), confirming that the augmentation strategy significantly reduced overfitting and improved generalization.
