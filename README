@@ -1,0 +1,29 @@
+FULL_NAME_1,FULL_NAME_2
+ID_1,ID_2
+
+Architecture: SE-ResNet-18 (Squeeze-and-Excitation ResNet-18) trained from scratch on 20 ImageNet classes. The network consists of a 7x7 stem convolution followed by four residual stages with channel counts 64-128-256-512, each block enhanced with a Squeeze-and-Excitation attention module that learns per-channel importance weights. Global average pooling feeds into a single fully-connected layer outputting 20 class logits. Total parameters: ~11.3M.
+
+Data split: Stratified 3-way split using a fixed seed (42) to guarantee reproducibility. Final training run uses 90% of the data (80% train + 10% val merged), with the held-out 10% test set evaluated once at the very end.
+
+Optimizer: Adam (lr=1e-3, weight_decay=1e-4) with CosineAnnealingLR decaying smoothly to 0 over 30 epochs. Loss: CrossEntropyLoss.
+
+Manipulation strategy: We applied augmentations directly to the training pipeline (not as a separate dataset) so the model learns invariance to visual changes during training. All augmentations are applied randomly on-the-fly per epoch, meaning the model never sees the exact same version of an image twice.
+
+Augmentations used and their motivation:
+- RandomResizedCrop (scale 0.5-1.0) with prior Padding: forces the model to recognize objects at different scales and positions, not rely on object being centered.
+- RandomHorizontalFlip: left-right symmetry invariance.
+- RandomVerticalFlip (p=0.1): rare orientation changes.
+- RandomRotation (30 degrees): rotation invariance, directly addresses the random_rotation augmentation in the test set.
+- ColorJitter (brightness=0.4, contrast=0.4, saturation=0.4, hue=0.15): color and lighting invariance, directly addresses the color_jitter augmentation in the test set.
+- RandomGrayscale (p=0.15): color-independent feature learning.
+- RandomPerspective (distortion=0.3): simulates different camera angles and viewpoints.
+- GaussianBlur (sigma 0.1-2.0): robustness to blur and image quality variation.
+- RandomAdjustSharpness: handles varying image sharpness.
+- RandomErasing (p=0.2): simulates partial occlusion, forces model to use multiple object regions rather than a single discriminative patch.
+
+Performance progression:
+- Baseline (50% data, no aug, 10 epochs): 76.2% val accuracy
+- With augmentations (60% data, 30 epochs): 85.2% val accuracy
+- Final run (90% data, 30 epochs, full augmentation pipeline): evaluated on held-out test set
+
+Key finding: Augmentations reduced the train/val accuracy gap from 18 percentage points (99.6% train vs 81% val) down to ~6 points (91% train vs 85% val), confirming that the augmentation strategy significantly reduced overfitting and improved generalization.
