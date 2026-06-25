@@ -1,5 +1,4 @@
 from pathlib import Path
-from collections import defaultdict
 import sys
 
 import joblib
@@ -17,79 +16,43 @@ from model import ModelArchitecture
 
 
 DATA_ROOT = Path(__file__).resolve().parents[2] / "dataset"
-AUG_ROOT  = Path(__file__).resolve().parents[2] / "augmentations"
-OUTPUT    = Path(__file__).resolve().parent / "weights.joblib"
+OUTPUT = Path(__file__).resolve().parent / "weights.joblib"
 
-IMAGE_SIZE = 224
+IMAGE_SIZE = 224   # standard ImageNet input size
 BATCH_SIZE = 64
-EPOCHS     = 50
-LR         = 1e-3
+TRAIN_FRACTION = 0.8   # 800 images/class = 16,000 total
+VAL_FRACTION   = 0.1   # 100 images/class =  2,000 total
+TEST_FRACTION  = 0.1   # 100 images/class =  2,000 total — held out until final run
+FINAL_RUN      = True # set True to train on 90% and evaluate test set once at end
+EPOCHS = 30
+LR = 1e-3
 WEIGHT_DECAY = 1e-4
-
-TRAIN_FRACTION = 0.5  # 500 images/class
-VAL_FRACTION   = 0.4  # 400 images/class
-TEST_FRACTION  = 0.1  # 100 images/class — DO NOT touch until final run
 
 # ImageNet channel mean and std — must match what evaluate.py uses
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD  = (0.229, 0.224, 0.225)
 
 
-class GaussianNoise:
-    """
-    Adds random Gaussian noise to a tensor (applied between ToTensor and Normalize).
-    Simulates sensor noise and image compression artifacts.
-    """
-    def __init__(self, std: float = 0.05, p: float = 0.3):
-        self.std = std
-        self.p   = p
-
-    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
-        if torch.rand(1).item() < self.p:
-            return (tensor + torch.randn_like(tensor) * self.std).clamp(0.0, 1.0)
-        return tensor
-
-
 def build_transforms(train: bool) -> transforms.Compose:
     """
-    Training pipeline — rich augmentations to improve robustness:
-      - RandomResizedCrop:  simulates close-up / zoom-in on object parts
-      - RandomHorizontalFlip + RandomVerticalFlip: mirroring
-      - RandomRotation:     rotation up to 30 degrees
-      - RandomAffine:       stretch and shear (densed/stretched pictures)
-      - ColorJitter:        brightness, contrast, saturation, hue changes
-      - RandomGrayscale:    forces model to learn shape, not just color
-      - RandomAutocontrast: simulates different contrast levels
-      - GaussianNoise:      simulates sensor noise
-      - RandomErasing:      simulates occlusion (part of object hidden)
-
-    Validation/Test pipeline — deterministic, no randomness:
-      - Pad + Resize + CenterCrop only
+    Training pipeline: augmentations to improve robustness and reduce overfitting.
+    Validation pipeline: deterministic, no randomness.
     """
     if train:
         return transforms.Compose([
-            # Pad small images to avoid distortion, then zoom-in crop
             transforms.Pad(padding=IMAGE_SIZE // 2, fill=0),
-            # RandomResizedCrop: randomly zooms into 50-100% of the image
-            # teaches the model to recognize partial/close-up views
             transforms.RandomResizedCrop(IMAGE_SIZE, scale=(0.5, 1.0)),
             transforms.RandomHorizontalFlip(),
             transforms.RandomVerticalFlip(p=0.1),
             transforms.RandomRotation(degrees=30),
-            # Stretch/shear: simulates densed or stretched pictures
-            transforms.RandomAffine(degrees=0, shear=15, scale=(0.8, 1.2)),
-            # Color changes: brightness, contrast, saturation, hue
-            transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1),
-            # Black-and-white: forces the model to use shape, not color
-            transforms.RandomGrayscale(p=0.2),
-            # Contrast variation
-            transforms.RandomAutocontrast(p=0.3),
+            transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.15),
+            transforms.RandomGrayscale(p=0.15),
+            transforms.RandomPerspective(distortion_scale=0.3, p=0.3),
+            transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
+            transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.3),
             transforms.ToTensor(),
-            # Gaussian noise (applied before normalize so values stay in [0,1])
-            GaussianNoise(std=0.05, p=0.3),
+            transforms.RandomErasing(p=0.2, scale=(0.02, 0.2)),
             transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-            # RandomErasing: blacks out a random rectangle — simulates occlusion
-            transforms.RandomErasing(p=0.3, scale=(0.02, 0.2)),
         ])
     else:
         return transforms.Compose([
@@ -102,10 +65,10 @@ def build_transforms(train: bool) -> transforms.Compose:
 
 
 class SplitDataset(torch.utils.data.Dataset):
-    """Dataset built from an explicit list of (img_path, label) pairs."""
+    """A dataset built from an explicit list of (img_path, label) samples."""
 
     def __init__(self, samples, transform):
-        self.samples   = samples
+        self.samples = samples
         self.transform = transform
 
     def __len__(self):
@@ -121,12 +84,16 @@ class SplitDataset(torch.utils.data.Dataset):
 def stratified_split(full_dataset, seed: int = 42):
     """
     Split each class into exactly:
-      50% training   (500 images/class = 10,000 total)
-      40% validation (400 images/class =  8,000 total)
-      10% test       (100 images/class =  2,000 total) — held out until final run
+      - 80% training   (800 images/class = 16,000 total)
+      - 10% validation (100 images/class =  2,000 total)  <- used every run
+      - 10% test       (100 images/class =  2,000 total)  <- never touch until final
 
-    Fixed seed guarantees the exact same splits on every run.
+    The same seed guarantees the exact same three splits on every run,
+    so the test set is never accidentally exposed during development.
     """
+    from collections import defaultdict
+
+    # Group sample indices by class label
     class_indices = defaultdict(list)
     for idx, (_, label) in enumerate(full_dataset.samples):
         class_indices[label].append(idx)
@@ -137,9 +104,10 @@ def stratified_split(full_dataset, seed: int = 42):
     for label, indices in sorted(class_indices.items()):
         n_train = int(len(indices) * TRAIN_FRACTION)  # 500
         n_val   = int(len(indices) * VAL_FRACTION)    # 400
-        # remaining 100 go to test
+        # remaining goes to test (100)
 
-        perm     = torch.randperm(len(indices), generator=rng).tolist()
+        # Shuffle indices for this class before splitting
+        perm = torch.randperm(len(indices), generator=rng).tolist()
         shuffled = [indices[i] for i in perm]
 
         for idx in shuffled[:n_train]:
@@ -152,80 +120,45 @@ def stratified_split(full_dataset, seed: int = 42):
     return train_samples, val_samples, test_samples
 
 
-def load_augmentation_samples():
-    """
-    Load pre-saved augmented images from the augmentations/ folder.
-    These are added to the training set as additional data.
-
-    Structure expected:
-      augmentations/
-        color_jitter/
-          acoustic_guitar/  (*.jpg)
-          ...
-        random_rotation/
-          acoustic_guitar/
-          ...
-    """
-    from labels import HF_INDEX_TO_NAME, HF_INDEX_TO_IDX
-
-    # Map class name -> local index (0-19)
-    name_to_idx = {
-        name: HF_INDEX_TO_IDX[hf_idx]
-        for hf_idx, name in HF_INDEX_TO_NAME.items()
-    }
-
-    samples = []
-
-    if not AUG_ROOT.exists():
-        print(f"Warning: {AUG_ROOT} not found — skipping pre-saved augmentations")
-        return samples
-
-    for aug_dir in sorted(AUG_ROOT.iterdir()):
-        if not aug_dir.is_dir():
-            continue
-        for class_dir in sorted(aug_dir.iterdir()):
-            if not class_dir.is_dir():
-                continue
-            class_name = class_dir.name
-            if class_name not in name_to_idx:
-                continue
-            label = name_to_idx[class_name]
-            for ext in ("*.jpg", "*.jpeg", "*.JPEG", "*.png"):
-                for img_path in sorted(class_dir.glob(ext)):
-                    samples.append((img_path, label))
-
-    print(f"Loaded {len(samples)} pre-saved augmentation images from {AUG_ROOT.name}/")
-    return samples
-
-
 def get_dataloaders():
+    # Load full dataset without transforms — each split applies its own
     full_dataset = ImageNetSubset(DATA_ROOT, split="train", transform=None)
 
     # Three-way stratified split — same seed = same splits every run
     train_samples, val_samples, test_samples = stratified_split(full_dataset)
 
-    # Add pre-saved augmentation images to training set only
-    aug_samples = load_augmentation_samples()
-    train_samples = train_samples + aug_samples
-
-    print(
-        f"Train: {len(train_samples)} (incl. {len(aug_samples)} pre-saved aug) | "
-        f"Val: {len(val_samples)} | "
-        f"Test (held-out): {len(test_samples)} — DO NOT evaluate until final run"
-    )
-
-    train_dataset = SplitDataset(train_samples, transform=build_transforms(train=True))
-    val_dataset   = SplitDataset(val_samples,   transform=build_transforms(train=False))
+    if FINAL_RUN:
+        # Merge val into train — use all 90%, evaluate on test once at end
+        train_samples = train_samples + val_samples
+        val_samples = []
+        print(
+            f"FINAL RUN — Train: {len(train_samples)} | "
+            f"Test: {len(test_samples)} (evaluated once at end)"
+        )
+    else:
+        print(
+            f"Train: {len(train_samples)} | "
+            f"Val: {len(val_samples)} | "
+            f"Test (held-out): {len(test_samples)} — DO NOT evaluate until final run"
+        )
 
     pin = torch.cuda.is_available()
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,  num_workers=4, pin_memory=pin)
-    val_loader   = DataLoader(val_dataset,   batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=pin)
 
-    return train_loader, val_loader
+    train_dataset = SplitDataset(train_samples, transform=build_transforms(train=True))
+    train_loader  = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,  num_workers=2, pin_memory=pin)
+
+    if FINAL_RUN:
+        test_dataset = SplitDataset(test_samples, transform=build_transforms(train=False))
+        test_loader  = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=pin)
+        return train_loader, None, test_loader
+
+    val_dataset  = SplitDataset(val_samples, transform=build_transforms(train=False))
+    val_loader   = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=pin)
+    return train_loader, val_loader, None
 
 
 def train_one_epoch(model, loader, optimizer, loss_fn, device):
-    """One full pass over the training set. Returns avg loss and accuracy."""
+    """Run one full pass over the training set, return loss and accuracy."""
     model.train()
     total_loss, correct, total = 0.0, 0, 0
 
@@ -234,35 +167,41 @@ def train_one_epoch(model, loader, optimizer, loss_fn, device):
 
         optimizer.zero_grad()
         logits = model(images)
-        loss   = loss_fn(logits, labels)
+        loss = loss_fn(logits, labels)
         loss.backward()
         optimizer.step()
 
         total_loss += loss.item() * images.size(0)
-        correct    += (logits.argmax(dim=1) == labels).sum().item()
-        total      += images.size(0)
+        correct += (logits.argmax(dim=1) == labels).sum().item()
+        total += images.size(0)
 
     return total_loss / total, correct / total
 
 
 @torch.no_grad()
 def evaluate(model, loader, device):
-    """Run inference on a loader, return accuracy."""
+    """Run inference on the validation set, return accuracy."""
     model.eval()
     correct, total = 0, 0
 
     for images, labels in loader:
         images, labels = images.to(device), labels.to(device)
-        preds    = model(images).argmax(dim=1)
+        preds = model(images).argmax(dim=1)
         correct += (preds == labels).sum().item()
-        total   += labels.size(0)
+        total += labels.size(0)
 
     return correct / total
 
 
 def main():
+    """
+    Full training pipeline.
+
+    This script must create weights.joblib.
+    """
     start = time.time()
 
+    # Detect best available device (MPS for Apple Silicon, CUDA for NVIDIA, else CPU)
     device = torch.device(
         "cuda" if torch.cuda.is_available()
         else "mps" if torch.backends.mps.is_available()
@@ -270,41 +209,60 @@ def main():
     )
     print(f"Using device: {device}")
 
-    # Load dataset — 50/40/10 stratified split + pre-saved augmentations in training
-    train_loader, val_loader = get_dataloaders()
+    train_loader, val_loader, test_loader = get_dataloaders()
 
-    model   = ModelArchitecture(num_classes=20, dropout=0.5).to(device)
-    # Label smoothing: prevents overconfidence, improves generalization
-    loss_fn = nn.CrossEntropyLoss(label_smoothing=0.1)
+    # Create model and move to device
+    model = ModelArchitecture(num_classes=20).to(device)
 
+    # CrossEntropyLoss expects raw logits — handles softmax internally
+    loss_fn = nn.CrossEntropyLoss()
+
+    # Adam optimizer: adapts learning rate per parameter, works well from scratch
     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+
+    # Cosine annealing: smoothly decays LR from LR to near 0 over all epochs
+    # avoids the model getting stuck near a sharp local minimum late in training
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
+    # Track best validation accuracy to save the best checkpoint
     best_val_acc = 0.0
-    best_state   = None
+    best_state = None
 
     for epoch in range(1, EPOCHS + 1):
         train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, loss_fn, device)
-        val_acc = evaluate(model, val_loader, device)
         scheduler.step()
 
-        print(
-            f"Epoch {epoch:02d}/{EPOCHS} | "
-            f"Loss: {train_loss:.4f} | "
-            f"Train Acc: {train_acc:.4f} | "
-            f"Val Acc: {val_acc:.4f} | "
-            f"LR: {scheduler.get_last_lr()[0]:.2e}"
-        )
+        if FINAL_RUN:
+            print(
+                f"Epoch {epoch:02d}/{EPOCHS} | "
+                f"Loss: {train_loss:.4f} | "
+                f"Train Acc: {train_acc:.4f} | "
+                f"LR: {scheduler.get_last_lr()[0]:.2e}"
+            )
+        else:
+            val_acc = evaluate(model, val_loader, device)
+            print(
+                f"Epoch {epoch:02d}/{EPOCHS} | "
+                f"Loss: {train_loss:.4f} | "
+                f"Train Acc: {train_acc:.4f} | "
+                f"Val Acc: {val_acc:.4f} | "
+                f"LR: {scheduler.get_last_lr()[0]:.2e}"
+            )
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                print(f"  -> New best val acc: {best_val_acc:.4f} — checkpoint saved")
 
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            best_state   = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            print(f"  -> New best val acc: {best_val_acc:.4f} — checkpoint saved")
-
-    print(f"\nTraining complete. Best val accuracy: {best_val_acc:.4f}")
+    if FINAL_RUN:
+        # Save final epoch weights and evaluate on test set once
+        best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+        test_acc = evaluate(model, test_loader, device)
+        print(f"\nFinal run complete. Test accuracy: {test_acc:.4f}")
+    else:
+        print(f"\nTraining complete. Best val accuracy: {best_val_acc:.4f}")
     print(f"Total time: {(time.time() - start) / 60:.1f} min")
 
-    # Move to CPU before saving — required for hardware-independent loading
+    # Save best weights to weights.joblib (required by the submission format)
     joblib.dump(best_state, OUTPUT)
     print(f"Saved weights to {OUTPUT}")
 
