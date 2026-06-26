@@ -1,5 +1,4 @@
 Shahar Paltiel,Inbal Sela,Yahli Zamero,Aderet Sebbagh
-323022376,211845912,210019204,214104358
 
 1. Architecture: SE-ResNet-18 (Squeeze-and-Excitation ResNet-18) trained from scratch on 20 ImageNet classes.
 The network first layer is a 7x7 convolution followed by four residual stages with channel counts 
