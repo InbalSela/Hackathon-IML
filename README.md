@@ -8,12 +8,10 @@ We built and trained a **SE-ResNet-18** CNN from scratch in PyTorch, with heavy 
 
 ## Team
 
-| Name | Student ID |
-|------|------------|
-| Shahar Paltiel | 323022376 |
-| Inbal Sela | 211845912 |
-| Yahli Zamero | 210019204 |
-| Aderet Sebbagh | 214104358 |
+- Shahar Paltiel
+- Inbal Sela
+- Yahli Zamero
+- Aderet Sebbagh
 
 ---
 
